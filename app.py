@@ -14,7 +14,6 @@ transform = transforms.Compose([
     transforms.Normalize(mean=[0.5], std=[0.5])  
 ])
 
-# Load the model
 model = ConvNeuralNet(num_classes=2)
 model.load_state_dict(torch.load("model.pth"))
 model.eval()
@@ -29,22 +28,20 @@ def validate_skin():
     print(url)
     
     try:
-        # Fetch image with a timeout
-        response = requests.get(url, timeout=10)  # Timeout after 10 seconds
+        response = requests.get(url, timeout=10) 
         response.raise_for_status()
         
-        # Logging the status and headers for debugging
         print(f"Status Code: {response.status_code}")
         print(f"Headers: {response.headers}")
         
         img = Image.open(BytesIO(response.content))
         
-        img_tensor = transform(img).unsqueeze(0)  # Add batch dimension
+        img_tensor = transform(img).unsqueeze(0)
         
         output = model(img_tensor)
         _, predicted = torch.max(output, 1)
         
-        is_skin = predicted.item() == 1  # Assuming 1 is 'skin' and 0 is 'not skin'
+        is_skin = predicted.item() == 1  # 1 is 'skin' and 0 is 'not skin'
         
         return jsonify({"value": is_skin})
     
