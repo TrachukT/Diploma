@@ -1,0 +1,6 @@
+fastapi[standard]
+pydantic
+torch
+torchvision
+pillow
+requests
