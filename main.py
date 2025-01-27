@@ -1,3 +1,6 @@
+from urllib.parse import urlparse
+
+import boto3
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import torch
@@ -30,13 +33,21 @@ async def validate_skin(request: RequestBodyModel):
         validation_model = ConvNeuralNet(num_classes=2)
         validation_model.load_state_dict(torch.load("model.pth"))
         validation_model.eval()
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
+        parsed_url = urlparse(url)
+        if parsed_url.scheme != "s3":
+            raise ValueError("URL повинен починатися з s3://")
 
-        print(f"Status Code: {response.status_code}")
-        print(f"Headers: {response.headers}")
+        bucket_name = parsed_url.netloc
+        object_key = parsed_url.path.lstrip("/")
+        s3 = boto3.client('s3')
 
-        img = Image.open(BytesIO(response.content))
+        response = s3.get_object(Bucket=bucket_name, Key=object_key)
+        print(f"Status Code: {response['ResponseMetadata']['HTTPStatusCode']}")
+        print(f"Headers: {response['ResponseMetadata']}")
+
+        file_content = response['Body'].read()
+
+        img = Image.open(BytesIO(file_content))
         img_tensor = transform(img).unsqueeze(0)
         
         output = validation_model(img_tensor)
@@ -60,10 +71,22 @@ async def classify_skin(request: RequestBodyModel):
         classification_model = ConvNeuralNet(num_classes=7)
         classification_model.load_state_dict(torch.load("classification_model.pth"))
         classification_model.eval()
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
 
-        img = Image.open(BytesIO(response.content))
+        parsed_url = urlparse(url)
+        if parsed_url.scheme != "s3":
+            raise ValueError("URL повинен починатися з s3://")
+
+        bucket_name = parsed_url.netloc
+        object_key = parsed_url.path.lstrip("/")
+        s3 = boto3.client('s3')
+
+        response = s3.get_object(Bucket=bucket_name, Key=object_key)
+        print(f"Status Code: {response['ResponseMetadata']['HTTPStatusCode']}")
+        print(f"Headers: {response['ResponseMetadata']}")
+
+        file_content = response['Body'].read()
+
+        img = Image.open(BytesIO(file_content))
         img_tensor = transform(img).unsqueeze(0)
 
         with torch.no_grad():
