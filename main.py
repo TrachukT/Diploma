@@ -11,6 +11,8 @@ import requests
 from io import BytesIO
 from NN_class import ConvNeuralNet  # Import your model class
 
+DETECTION_TYPE = "epidermology"
+RESULTS_FOLDER = "results"
 
 #To run this app:
 # fastapi dev main.py
@@ -74,8 +76,6 @@ async def classify_skin(request: ClassificationRequestModel):
     url = request.url
     user_id = request.user_id
     timestamp = request.timestamp
-    DETECTION_TYPE = "epidermology"
-    RESULTS_FOLDER = "results"
 
     try:
         classification_model = ConvNeuralNet(num_classes=7)
