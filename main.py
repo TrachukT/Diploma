@@ -1,8 +1,9 @@
+import json
 from urllib.parse import urlparse
 
 import boto3
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import torch
 import torchvision.transforms as transforms
 from PIL import Image
@@ -10,13 +11,14 @@ import requests
 from io import BytesIO
 from NN_class import ConvNeuralNet  # Import your model class
 
+
 #To run this app:
 # fastapi dev main.py
 
 app = FastAPI()
 
-class RequestBodyModel(BaseModel):
-    url: str
+class ValidationRequestModel(BaseModel):
+    url: str= Field(..., description="Parameter to provide url for image scraping.")
 
 transform = transforms.Compose([
     transforms.Resize((64, 64)),  
@@ -25,7 +27,7 @@ transform = transforms.Compose([
 ])
 
 @app.post("/validate-skin")
-async def validate_skin(request: RequestBodyModel):
+async def validate_skin(request: ValidationRequestModel):
     url = request.url
     print(url)
 
@@ -62,10 +64,18 @@ async def validate_skin(request: RequestBodyModel):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+class ClassificationRequestModel(BaseModel):
+    url: str= Field(..., description="Parameter to provide url for image scraping.")
+    user_id: str= Field(..., description="Parameter to provide a user identifier.")
+    timestamp: str= Field(..., description="Parameter to provide a timestamp of request.")
 
 @app.post("/classify-skin")
-async def classify_skin(request: RequestBodyModel):
+async def classify_skin(request: ClassificationRequestModel):
     url = request.url
+    user_id = request.user_id
+    timestamp = request.timestamp
+    DETECTION_TYPE = "epidermology"
+    RESULTS_FOLDER = "results"
 
     try:
         classification_model = ConvNeuralNet(num_classes=7)
@@ -104,8 +114,14 @@ async def classify_skin(request: RequestBodyModel):
         }
 
         result = {class_labels[i]: prob for i, prob in enumerate(probabilities)}
+        base_path, old_folder, file_name = url.rsplit("/", 2)
+        new_file_name = f"{user_id}_{DETECTION_TYPE}_{timestamp}.txt"
+        new_s3_path = f"{base_path}/{RESULTS_FOLDER}/{new_file_name}"
+        s3_key = "/".join(new_s3_path.split("/")[3:])
 
-        return result
+        s3.put_object(Bucket=bucket_name, Key=s3_key, Body=json.dumps({**result,"image_url":url}),
+                      ContentType="application/json")
+        return {**result, "path": new_s3_path}
 
 
     except requests.RequestException as e:
