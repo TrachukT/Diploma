@@ -40,11 +40,11 @@ transform = transforms.Compose(
 )
 
 validation_model = ConvNeuralNet(num_classes=2)
-validation_model.load_state_dict(torch.load("model.pth"))
+validation_model.load_state_dict(torch.load("models/files/model.pth"))
 validation_model.eval()
 
 classification_model = ConvNeuralNet(num_classes=7)
-classification_model.load_state_dict(torch.load("classification_model.pth"))
+classification_model.load_state_dict(torch.load("models/files/classification_model.pth"))
 classification_model.eval()
 
 
