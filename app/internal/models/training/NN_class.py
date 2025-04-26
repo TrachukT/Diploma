@@ -9,25 +9,37 @@ class ConvNeuralNet(nn.Module):
         dropout_rate = 0.3  # Reduced dropout for better feature retention
 
         # First block with more initial filters
-        self.conv_layer1 = nn.Conv2d(in_channels=3, out_channels=64, kernel_size=3, padding=1)
+        self.conv_layer1 = nn.Conv2d(
+            in_channels=3, out_channels=64, kernel_size=3, padding=1
+        )
         self.bn1 = nn.BatchNorm2d(64)
-        self.conv_layer2 = nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, padding=1)
+        self.conv_layer2 = nn.Conv2d(
+            in_channels=64, out_channels=64, kernel_size=3, padding=1
+        )
         self.bn2 = nn.BatchNorm2d(64)
         self.max_pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
         self.dropout1 = nn.Dropout2d(dropout_rate)
 
         # Second block
-        self.conv_layer3 = nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, padding=1)
+        self.conv_layer3 = nn.Conv2d(
+            in_channels=64, out_channels=128, kernel_size=3, padding=1
+        )
         self.bn3 = nn.BatchNorm2d(128)
-        self.conv_layer4 = nn.Conv2d(in_channels=128, out_channels=128, kernel_size=3, padding=1)
+        self.conv_layer4 = nn.Conv2d(
+            in_channels=128, out_channels=128, kernel_size=3, padding=1
+        )
         self.bn4 = nn.BatchNorm2d(128)
         self.max_pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
         self.dropout2 = nn.Dropout2d(dropout_rate)
 
         # Third block with residual connection
-        self.conv_layer5 = nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3, padding=1)
+        self.conv_layer5 = nn.Conv2d(
+            in_channels=128, out_channels=256, kernel_size=3, padding=1
+        )
         self.bn5 = nn.BatchNorm2d(256)
-        self.conv_layer6 = nn.Conv2d(in_channels=256, out_channels=256, kernel_size=3, padding=1)
+        self.conv_layer6 = nn.Conv2d(
+            in_channels=256, out_channels=256, kernel_size=3, padding=1
+        )
         self.bn6 = nn.BatchNorm2d(256)
         self.max_pool3 = nn.MaxPool2d(kernel_size=2, stride=2)
         self.dropout3 = nn.Dropout2d(dropout_rate)

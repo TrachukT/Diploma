@@ -36,12 +36,16 @@ transform = transforms.Compose(
 )
 
 validation_model = ConvNeuralNet(num_classes=2)
-validation_model.load_state_dict(torch.load("C:/Diploma/Diploma/app/internal/models/files/val_model.pth"))
+validation_model.load_state_dict(
+    torch.load("C:/Diploma/Diploma/app/internal/models/files/val_model.pth")
+)
 validation_model.eval()
 
 classification_model = ConvNeuralNet(num_classes=7)
 classification_model.load_state_dict(
-    torch.load("C:/Diploma/Diploma/app/internal/models/files/custom_classification_model.pth")
+    torch.load(
+        "C:/Diploma/Diploma/app/internal/models/files/custom_classification_model.pth"
+    )
 )
 classification_model.eval()
 

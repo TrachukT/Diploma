@@ -1,8 +1,10 @@
+from typing import Annotated
+
 from fastapi import HTTPException, UploadFile, File, APIRouter
 import uuid
 
 from app.schemas.vector import *
-from vector_db import Document, WeaviateVectorStorage
+from app.services.vector_db import Document, WeaviateVectorStorage
 from models.training.utils import (
     extract_text_from_csv,
     extract_text_from_docx,
@@ -21,7 +23,7 @@ class DBSingleton:
         return cls._instance
 
 
-@router.post("/upload")
+@router.post("/file/upload")
 async def upload_file(file: UploadFile = File(...)):
     try:
         db = DBSingleton()
@@ -48,10 +50,9 @@ async def upload_file(file: UploadFile = File(...)):
             status_code=400, detail=f"Неможливо прочитати файл: {str(e)}"
         )
 
-    doc_id = file.filename
-    metadata = {"source": "upload", "extension": ext}
+    metadata = {"filename": file.filename, "source": "upload", "extension": ext}
 
-    document = Document(id=doc_id, content=text, metadata=metadata)
+    document = Document(content=text, metadata=metadata)
 
     try:
         db.write_document(document)
@@ -61,7 +62,40 @@ async def upload_file(file: UploadFile = File(...)):
     return {"status": "OK", "filename": file.filename}
 
 
-# Ендпоінти
+@router.post("/files/batch")
+async def upload_file(files: Annotated[list[UploadFile], File()]):
+    try:
+        db = DBSingleton()
+        documents = []
+        for file in files:
+            contents = await file.read()
+            ext = file.filename.lower().split(".")[-1]
+            # 1. PDF
+            if ext == "pdf":
+                text = extract_text_from_pdf(contents)
+            # 2. CSV
+            elif ext == "csv":
+                text = extract_text_from_csv(contents)
+            # 3. DOCX
+            elif ext == "docx":
+                text = extract_text_from_docx(contents)
+            else:
+                raise HTTPException(status_code=400, detail="Непідтримуваний тип файлу")
+
+            metadata = {"filename": file.filename, "source": "upload", "extension": ext}
+
+            documents.append(Document(content=text, metadata=metadata))
+
+        try:
+            db.batch_write_documents(documents)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+        return {"uploaded_files": len(files)}
+    except Exception:
+        raise
+
+
 @router.post("/documents", response_model=DocumentIdResponse)
 async def write_document(request: DocumentWriteRequest):
     """Store a document with its embedding in vector storage"""
@@ -69,13 +103,8 @@ async def write_document(request: DocumentWriteRequest):
         db = DBSingleton()
 
         # Generate ID if not provided
-        doc_id = request.id or str(uuid.uuid4())
-
         document = Document(
-            id=doc_id,
-            content=request.content,
-            metadata=request.metadata,
-            embedding=request.embedding,
+            id=request.id, content=request.content, metadata=request.metadata
         )
 
         result_id = db.write_document(document)
@@ -90,17 +119,10 @@ async def batch_write_documents(request: BatchWriteRequest):
     try:
         db = DBSingleton()
 
-        documents = []
-        for doc_req in request.documents:
-            doc_id = doc_req.id or str(uuid.uuid4())
-            documents.append(
-                Document(
-                    id=doc_id,
-                    content=doc_req.content,
-                    metadata=doc_req.metadata,
-                    embedding=doc_req.embedding,
-                )
-            )
+        documents = [
+            Document(id=doc.id, content=doc.content, metadata=doc.metadata)
+            for doc in request.documents
+        ]
 
         written = db.batch_write_documents(documents)
         return DocumentsWrittenResponse(documents_written=written)
@@ -125,20 +147,16 @@ async def update_document(document_id: str, request: DocumentUpdateRequest):
     """Update an existing document"""
     try:
         db = DBSingleton()
-        success = db.update_document(
+        db.update_document(
             document_id=document_id, content=request.content, metadata=request.metadata
         )
 
-        if success:
-            return StatusResponse(status="success", message="Document updated")
-        raise HTTPException(
-            status_code=404, detail="Document not found or update failed"
-        )
+        return StatusResponse(status="success", message="Document updated")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/documents", response_model=StatusResponse)
+@router.delete("/documents", response_model=StatusResponse | DeletedResponse)
 async def delete_documents(request: DeleteRequest):
     """Delete documents by IDs or all documents"""
     try:
@@ -196,16 +214,6 @@ async def search_hybrid(request: HybridSearchRequest):
             alpha=request.alpha,
         )
 
-        document_responses = [
-            DocumentResponse(
-                id=doc.id,
-                content=doc.content,
-                metadata=doc.metadata,
-                embedding=doc.embedding,
-            )
-            for doc in documents
-        ]
-
-        return {"documents": document_responses}
+        return {"documents": documents}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
