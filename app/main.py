@@ -52,7 +52,7 @@ app.include_router(models_router, prefix="/v1/models")
 # )
 #
 # validation_model = ConvNeuralNet(num_classes=2)
-# validation_model.load_state_dict(torch.load("models/files/val_model.pth"))
+# validation_model.load_state_dict(torch.load("models/files/validation_model.pth"))
 # validation_model.eval()
 #
 # classification_model = ConvNeuralNet(num_classes=7)

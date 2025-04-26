@@ -10,10 +10,11 @@ from PIL import Image
 import requests
 import torch.nn as nn
 from io import BytesIO
-from models.training.NN_class import ConvNeuralNet  # Import your model class
-from models.training.utils import train, evaluate
-from config import CLASS_LABELS, DETECTION_TYPE, RESULTS_FOLDER
-from typing import Optional
+from app.internal.models.training.NN_class import (
+    ConvNeuralNet,
+)  # Import your model class
+from app.internal.models.training.utils import train, evaluate
+from app.config import CLASS_LABELS, DETECTION_TYPE, RESULTS_FOLDER
 
 router = APIRouter()
 
@@ -37,7 +38,7 @@ transform = transforms.Compose(
 
 validation_model = ConvNeuralNet(num_classes=2)
 validation_model.load_state_dict(
-    torch.load("C:/Diploma/Diploma/app/internal/models/files/val_model.pth")
+    torch.load("/app/internal/models/files/validation_model.pth")
 )
 validation_model.eval()
 
@@ -128,7 +129,7 @@ async def classify_skin(request: ClassificationRequestModel):
             Body=json.dumps({**result, "image_url": url}),
             ContentType="application/json",
         )
-        return {**result, "path": new_s3_path}
+        return {**result, "results_path": new_s3_path, "image_url": url}
 
     except requests.RequestException as e:
         raise HTTPException(
