@@ -1,9 +1,5 @@
 import torch
 from sklearn.metrics import precision_score, recall_score, f1_score
-import io
-import csv
-import PyPDF2
-import docx
 
 
 def train(model, criterion, optimizer, device, train_loader):
@@ -74,24 +70,3 @@ def evaluate(model, device, test_loader):
     eval_f1 = f1_score(all_labels, all_preds, average="weighted", zero_division=0)
 
     return eval_accuracy, eval_precision, eval_recall, eval_f1
-
-
-def extract_text_from_pdf(contents: bytes) -> str:
-    reader = PyPDF2.PdfReader(io.BytesIO(contents))
-    text = ""
-    for page in reader.pages:
-        text += page.extract_text() or ""
-    return text.strip()
-
-
-def extract_text_from_csv(contents: bytes) -> str:
-    buffer = io.StringIO(contents.decode("utf-8"))
-    reader = csv.reader(buffer)
-    lines = ["; ".join(row) for row in reader]
-    return "\n".join(lines)
-
-
-def extract_text_from_docx(contents: bytes) -> str:
-    doc = docx.Document(io.BytesIO(contents))
-    text = "\n".join([p.text for p in doc.paragraphs])
-    return text

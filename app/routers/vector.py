@@ -5,7 +5,7 @@ import uuid
 
 from app.schemas.vector import *
 from app.services.vector_db import Document, WeaviateVectorStorage
-from models.training.utils import (
+from app.services.models import (
     extract_text_from_csv,
     extract_text_from_docx,
     extract_text_from_pdf,

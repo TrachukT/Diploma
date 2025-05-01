@@ -4,6 +4,7 @@ from urllib.parse import urlparse
 import boto3
 from fastapi import HTTPException, APIRouter, Depends
 from sqlalchemy.orm import Session
+from torchvision import models
 
 from app.db.config import get_db
 from app.db.model_metrics import ModelMetrics
@@ -22,7 +23,7 @@ from app.config import CLASS_LABELS, DETECTION_TYPE, RESULTS_FOLDER
 
 router = APIRouter()
 
-
+NUM_CLASSES = 7
 class S3ClientSingleton:
     _instance = None
 
@@ -46,13 +47,24 @@ validation_model.load_state_dict(
 )
 validation_model.eval()
 
-classification_model = ConvNeuralNet(num_classes=7)
-classification_model.load_state_dict(
-    torch.load(
-        "C:/Diploma/Diploma/app/internal/models/files/custom_classification_model.pth"
-    )
+device = torch.device('cpu') # Optimizes GPU performance
+
+classification_model = models.mobilenet_v2(pretrained=False)
+classification_model.classifier = nn.Sequential(
+    nn.Dropout(0.3),
+    nn.Linear(classification_model.last_channel, NUM_CLASSES)
 )
+
+classification_model.load_state_dict(torch.load("C:/Diploma/Diploma/app/internal/models/files/mobilenet_skin_disease_model.pth", map_location=device))
+classification_model.to(device)
 classification_model.eval()
+# classification_model = ConvNeuralNet(num_classes=7)
+# classification_model.load_state_dict(
+#     torch.load(
+#         "C:/Diploma/Diploma/app/internal/models/files/custom_classification_model.pth"
+#     )
+# )
+# classification_model.eval()
 
 
 @router.post("/validate-skin")
@@ -169,53 +181,34 @@ async def retrain_model(request: RetrainingRequestModel, db: Session = Depends(g
 
             # Get image from S3
             response = s3.get_object(Bucket=bucket_name, Key=object_key)
-            file_content = response["Body"].read()
-            img = Image.open(BytesIO(file_content))
-
-            # Find corresponding result file
-            base_path, old_folder, file_name = url.rsplit("/", 2)
-            result_path = f"{base_path}/{RESULTS_FOLDER}"
-
-            # List objects in results folder to find matching result
-            result_objects = s3.list_objects_v2(
-                Bucket=bucket_name, Prefix=f"{result_path.split('s3://')[1]}/"
-            )
-
-            if "Contents" not in result_objects:
-                continue
-
-            # Find result file that contains this image URL
-            result_file = None
-            for obj in result_objects["Contents"]:
-                result_key = obj["Key"]
-                result_response = s3.get_object(Bucket=bucket_name, Key=result_key)
-                result_content = json.loads(
-                    result_response["Body"].read().decode("utf-8")
-                )
-
-                if result_content.get("image_url") == url:
-                    result_file = result_content
-                    break
-
-            if not result_file:
-                continue
+            response_content = response["Body"].read()
+            result_response = json.loads(response_content.decode("utf-8"))
 
             # Extract the class with highest probability
             # Видаляємо 'image_url' зі словника перед пошуком максимуму
             classification_results = {
-                k: v for k, v in result_file.items() if k != "image_url"
+                k: v for k, v in result_response.items() if k != "image_url"
             }
             max_class = max(classification_results.items(), key=lambda x: x[1])
             class_name, probability = max_class
 
             # Додаємо зображення для тренування тільки якщо ймовірність < 0.8
             if probability < 0.8:
+                parsed_url = urlparse(result_response.get("image_url"))
+                bucket_name = parsed_url.netloc
+                object_key = parsed_url.path.lstrip("/")
+
+                # Get image from S3
+                response = s3.get_object(Bucket=bucket_name, Key=object_key)
+                file_content = response["Body"].read()
+
+                img = Image.open(BytesIO(file_content))
                 # Convert image to tensor
                 img_tensor = transform(img)
                 training_images.append(img_tensor)
 
                 # Get label index from class name
-                label_idx = CLASS_LABELS.index(class_name)
+                label_idx = next(k for k, v in CLASS_LABELS.items() if v == class_name)
                 training_labels.append(label_idx)
 
         except Exception as e:
@@ -243,37 +236,6 @@ async def retrain_model(request: RetrainingRequestModel, db: Session = Depends(g
     # Get current model metrics before retraining
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # # Знаходимо останню версію моделі
-    # try:
-    #     model_objects = s3.list_objects_v2(
-    #         Bucket=bucket_name, Prefix="models/classification_model_"
-    #     )
-    #
-    #     if "Contents" in model_objects and model_objects["Contents"]:
-    #         # Сортуємо за датою і беремо найновішу
-    #         latest_model = sorted(
-    #             model_objects["Contents"], key=lambda x: x["LastModified"], reverse=True
-    #         )[0]
-    #         latest_model_key = latest_model["Key"]
-    #
-    #         # Завантажуємо останню версію моделі
-    #         latest_model_response = s3.get_object(
-    #             Bucket=bucket_name, Key=latest_model_key
-    #         )
-    #         latest_model_buffer = BytesIO(latest_model_response["Body"].read())
-    #
-    #         # Інціалізуємо і завантажуємо останню версію моделі
-    #         latest_classification_model = ConvNeuralNet(num_classes=7)
-    #         latest_classification_model.load_state_dict(torch.load(latest_model_buffer))
-    #         latest_classification_model.to(device)
-    #         latest_classification_model.eval()
-    #     else:
-    #         # Якщо немає попередніх моделей, використовуємо поточну
-    #         latest_classification_model = classification_model
-    # except Exception as e:
-    #     print(f"Error loading latest model: {str(e)}")
-    #     latest_classification_model = classification_model
-
     # Розділення на train і test
     test_size = max(1, int(len(train_dataset) * 0.2))
     train_size = len(train_dataset) - test_size
@@ -286,12 +248,6 @@ async def retrain_model(request: RetrainingRequestModel, db: Session = Depends(g
         train_subset, batch_size=8, shuffle=True
     )
 
-    # Отримуємо метрики перед ретренуванням
-    # old_accuracy, old_precision, old_recall, old_f1 = evaluate(
-    #     classification_model, device, test_loader
-    # )
-    #
-    # # Клонуємо модель для ретренування
 
     latest_metrics = (
         db.query(ModelMetrics)
@@ -300,7 +256,11 @@ async def retrain_model(request: RetrainingRequestModel, db: Session = Depends(g
         .first()
     )
 
-    model_to_train = ConvNeuralNet(num_classes=7)
+    model_to_train = models.mobilenet_v2(pretrained=False)
+    model_to_train.classifier = nn.Sequential(
+        nn.Dropout(0.3),
+        nn.Linear(model_to_train.last_channel, NUM_CLASSES)
+    )
     model_to_train.load_state_dict(classification_model.state_dict())
     model_to_train.to(device)
 
