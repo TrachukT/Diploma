@@ -2,7 +2,11 @@ import json
 from urllib.parse import urlparse
 
 import boto3
-from fastapi import HTTPException, APIRouter
+from fastapi import HTTPException, APIRouter, Depends
+from sqlalchemy.orm import Session
+
+from app.db.config import get_db
+from app.db.model_metrics import ModelMetrics
 from app.schemas.models import *
 import torch
 import torchvision.transforms as transforms
@@ -38,7 +42,7 @@ transform = transforms.Compose(
 
 validation_model = ConvNeuralNet(num_classes=2)
 validation_model.load_state_dict(
-    torch.load("/app/internal/models/files/validation_model.pth")
+    torch.load("C:/Diploma/Diploma/app/internal/models/files/validation_model.pth")
 )
 validation_model.eval()
 
@@ -79,7 +83,7 @@ async def validate_skin(request: ValidationRequestModel):
 
         is_skin = predicted.item() == 1  # 1 is 'skin', 0 is 'not skin'
 
-        return {"value": is_skin}
+        return {"is_skin": is_skin}
 
     except requests.RequestException as e:
         raise HTTPException(
@@ -140,7 +144,7 @@ async def classify_skin(request: ClassificationRequestModel):
 
 
 @router.post("/retrain-model", response_model=RetrainingResponse)
-async def retrain_model(request: RetrainingRequestModel):
+async def retrain_model(request: RetrainingRequestModel, db: Session = Depends(get_db)):
     urls = request.urls
     user_id = request.user_id
     timestamp = request.timestamp
@@ -151,7 +155,7 @@ async def retrain_model(request: RetrainingRequestModel):
     # Lists to store training data
     training_images = []
     training_labels = []
-
+    bucket_name = None
     # Process each image URL
     for url in urls:
         try:
@@ -239,36 +243,36 @@ async def retrain_model(request: RetrainingRequestModel):
     # Get current model metrics before retraining
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Знаходимо останню версію моделі
-    try:
-        model_objects = s3.list_objects_v2(
-            Bucket=bucket_name, Prefix="models/classification_model_"
-        )
-
-        if "Contents" in model_objects and model_objects["Contents"]:
-            # Сортуємо за датою і беремо найновішу
-            latest_model = sorted(
-                model_objects["Contents"], key=lambda x: x["LastModified"], reverse=True
-            )[0]
-            latest_model_key = latest_model["Key"]
-
-            # Завантажуємо останню версію моделі
-            latest_model_response = s3.get_object(
-                Bucket=bucket_name, Key=latest_model_key
-            )
-            latest_model_buffer = BytesIO(latest_model_response["Body"].read())
-
-            # Інціалізуємо і завантажуємо останню версію моделі
-            latest_classification_model = ConvNeuralNet(num_classes=7)
-            latest_classification_model.load_state_dict(torch.load(latest_model_buffer))
-            latest_classification_model.to(device)
-            latest_classification_model.eval()
-        else:
-            # Якщо немає попередніх моделей, використовуємо поточну
-            latest_classification_model = classification_model
-    except Exception as e:
-        print(f"Error loading latest model: {str(e)}")
-        latest_classification_model = classification_model
+    # # Знаходимо останню версію моделі
+    # try:
+    #     model_objects = s3.list_objects_v2(
+    #         Bucket=bucket_name, Prefix="models/classification_model_"
+    #     )
+    #
+    #     if "Contents" in model_objects and model_objects["Contents"]:
+    #         # Сортуємо за датою і беремо найновішу
+    #         latest_model = sorted(
+    #             model_objects["Contents"], key=lambda x: x["LastModified"], reverse=True
+    #         )[0]
+    #         latest_model_key = latest_model["Key"]
+    #
+    #         # Завантажуємо останню версію моделі
+    #         latest_model_response = s3.get_object(
+    #             Bucket=bucket_name, Key=latest_model_key
+    #         )
+    #         latest_model_buffer = BytesIO(latest_model_response["Body"].read())
+    #
+    #         # Інціалізуємо і завантажуємо останню версію моделі
+    #         latest_classification_model = ConvNeuralNet(num_classes=7)
+    #         latest_classification_model.load_state_dict(torch.load(latest_model_buffer))
+    #         latest_classification_model.to(device)
+    #         latest_classification_model.eval()
+    #     else:
+    #         # Якщо немає попередніх моделей, використовуємо поточну
+    #         latest_classification_model = classification_model
+    # except Exception as e:
+    #     print(f"Error loading latest model: {str(e)}")
+    #     latest_classification_model = classification_model
 
     # Розділення на train і test
     test_size = max(1, int(len(train_dataset) * 0.2))
@@ -283,13 +287,21 @@ async def retrain_model(request: RetrainingRequestModel):
     )
 
     # Отримуємо метрики перед ретренуванням
-    old_accuracy, old_precision, old_recall, old_f1 = evaluate(
-        latest_classification_model, device, test_loader
+    # old_accuracy, old_precision, old_recall, old_f1 = evaluate(
+    #     classification_model, device, test_loader
+    # )
+    #
+    # # Клонуємо модель для ретренування
+
+    latest_metrics = (
+        db.query(ModelMetrics)
+        .filter(ModelMetrics.model_type == DETECTION_TYPE)
+        .order_by(ModelMetrics.created_at.desc())
+        .first()
     )
 
-    # Клонуємо модель для ретренування
     model_to_train = ConvNeuralNet(num_classes=7)
-    model_to_train.load_state_dict(latest_classification_model.state_dict())
+    model_to_train.load_state_dict(classification_model.state_dict())
     model_to_train.to(device)
 
     # Налаштування для тренування
@@ -302,15 +314,28 @@ async def retrain_model(request: RetrainingRequestModel):
     )
 
     # Оцінюємо після ретренування
-    new_accuracy, new_precision, new_recall, new_f1 = evaluate(
+    eval_accuracy, eval_precision, eval_recall, eval_f1 = evaluate(
         model_to_train, device, test_loader
     )
 
-    # Порівнюємо метрики
-    metrics_improved = new_accuracy > old_accuracy and new_f1 > old_f1
+    # Отримуємо старі метрики з БД
+    old_train_acc = latest_metrics.training_accuracy or 0
+    old_train_f1 = latest_metrics.training_f1_score or 0
+    old_eval_acc = latest_metrics.evaluation_accuracy or 0
+    old_eval_f1 = latest_metrics.evaluation_f1_score or 0
 
-    # Зберігаємо модель і метрики, якщо покращились
-    if metrics_improved:
+    # Перевіряємо покращення
+    train_improved = train_accuracy > old_train_acc and train_f1 > old_train_f1
+    eval_improved = eval_accuracy > old_eval_acc and eval_f1 > old_eval_f1
+
+    # Перевіряємо, що немає оверфіту (різниця між train і eval не надто велика)
+    f1_gap = abs(train_f1 - eval_f1)
+    max_allowed_gap = 0.1  # Можеш змінити цей поріг
+
+    not_overfitting = f1_gap < max_allowed_gap
+
+    # Зберігаємо модель і метрики, якщо всі умови виконані
+    if train_improved and eval_improved and not_overfitting:
         # Зберігаємо модель в S3
         model_buffer = BytesIO()
         torch.save(model_to_train.state_dict(), model_buffer)
@@ -326,10 +351,15 @@ async def retrain_model(request: RetrainingRequestModel):
 
         # Зберігаємо метрики
         metrics = {
-            "accuracy": float(new_accuracy),
-            "precision": float(new_precision),
-            "recall": float(new_recall),
-            "f1": float(new_f1),
+            "training_loss": float(train_loss),
+            "training_accuracy": float(train_accuracy),
+            "training_precision": float(train_precision),
+            "training_recall": float(train_recall),
+            "training_f1_score": float(train_f1),
+            "evaluation_accuracy": float(eval_accuracy),
+            "evaluation_precision": float(eval_precision),
+            "evaluation_recall": float(eval_recall),
+            "evaluation_f1_score": float(eval_f1),
             "timestamp": timestamp,
             "trained_on_images": len(training_images),
         }
@@ -343,36 +373,38 @@ async def retrain_model(request: RetrainingRequestModel):
         )
 
         return RetrainingResponse(
-            message="Model retrained successfully with improved metrics",
+            message="Model retrained successfully with improved metrics and no overfitting",
             old_metrics=MetricsResponse(
-                accuracy=float(old_accuracy),
-                precision=float(old_precision),
-                recall=float(old_recall),
-                f1=float(old_f1),
+                accuracy=float(old_eval_acc),
+                precision=float(latest_metrics.evaluation_precision or 0),
+                recall=float(latest_metrics.evaluation_recall or 0),
+                f1=float(old_eval_f1),
             ),
             new_metrics=MetricsResponse(
-                accuracy=float(new_accuracy),
-                precision=float(new_precision),
-                recall=float(new_recall),
-                f1=float(new_f1),
+                accuracy=float(eval_accuracy),
+                precision=float(eval_precision),
+                recall=float(eval_recall),
+                f1=float(eval_f1),
             ),
             model_path=f"s3://{bucket_name}/{model_key}",
         )
     else:
-        # Логуємо, що метрики погіршились
-        print(f"Metrics got worse after retraining. Old F1: {old_f1}, New F1: {new_f1}")
+        # Логуємо, що метрики не покращились або є оверфіт
+        print(
+            f"Train improved: {train_improved}, Eval improved: {eval_improved}, F1 gap: {f1_gap}"
+        )
         return RetrainingResponse(
-            message="Model retraining did not improve metrics",
+            message="Model retraining did not improve metrics or overfitting detected",
             old_metrics=MetricsResponse(
-                accuracy=float(old_accuracy),
-                precision=float(old_precision),
-                recall=float(old_recall),
-                f1=float(old_f1),
+                accuracy=float(old_eval_acc),
+                precision=float(latest_metrics.evaluation_precision or 0),
+                recall=float(latest_metrics.evaluation_recall or 0),
+                f1=float(old_eval_f1),
             ),
             new_metrics=MetricsResponse(
-                accuracy=float(new_accuracy),
-                precision=float(new_precision),
-                recall=float(new_recall),
-                f1=float(new_f1),
+                accuracy=float(eval_accuracy),
+                precision=float(eval_precision),
+                recall=float(eval_recall),
+                f1=float(eval_f1),
             ),
         )
