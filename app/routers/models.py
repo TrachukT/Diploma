@@ -4,6 +4,7 @@ from urllib.parse import urlparse
 import boto3
 from fastapi import HTTPException, APIRouter, Depends
 from sqlalchemy.orm import Session
+from torch.utils.data import TensorDataset, DataLoader
 from torchvision import models
 
 from app.db.config import get_db
@@ -32,12 +33,18 @@ class S3ClientSingleton:
             cls._instance = boto3.client("s3")
         return cls._instance
 
-
-transform = transforms.Compose(
+valid_transform = transforms.Compose(
     [
-        transforms.Resize((64, 64)),
+        transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5], std=[0.5]),
+        # transforms.Normalize(mean=[0.5], std=[0.5]),
+    ]
+)
+classif_transform = transforms.Compose(
+    [
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        # transforms.Normalize(mean=[0.5], std=[0.5]),
     ]
 )
 
@@ -88,7 +95,7 @@ async def validate_skin(request: ValidationRequestModel):
         file_content = response["Body"].read()
 
         img = Image.open(BytesIO(file_content))
-        img_tensor = transform(img).unsqueeze(0)
+        img_tensor = valid_transform(img).unsqueeze(0)
 
         output = validation_model(img_tensor)
         _, predicted = torch.max(output, 1)
@@ -127,7 +134,7 @@ async def classify_skin(request: ClassificationRequestModel):
         file_content = response["Body"].read()
 
         img = Image.open(BytesIO(file_content))
-        img_tensor = transform(img).unsqueeze(0)
+        img_tensor = classif_transform(img).unsqueeze(0)
 
         with torch.no_grad():
             output = classification_model(img_tensor)
@@ -202,12 +209,9 @@ async def retrain_model(request: RetrainingRequestModel, db: Session = Depends(g
                 response = s3.get_object(Bucket=bucket_name, Key=object_key)
                 file_content = response["Body"].read()
 
-                img = Image.open(BytesIO(file_content))
-                # Convert image to tensor
-                img_tensor = transform(img)
-                training_images.append(img_tensor)
+                img = Image.open(BytesIO(file_content)).convert("RGB")
+                training_images.append(img)
 
-                # Get label index from class name
                 label_idx = next(k for k, v in CLASS_LABELS.items() if v == class_name)
                 training_labels.append(label_idx)
 
@@ -223,31 +227,41 @@ async def retrain_model(request: RetrainingRequestModel, db: Session = Depends(g
             new_metrics=MetricsResponse(accuracy=0, precision=0, recall=0, f1=0),
         )
 
-    # Convert lists to tensors
-    train_images = torch.stack(training_images)
-    train_labels = torch.tensor(training_labels)
+    dataset_size = len(training_images)
+    test_size = max(1, int(dataset_size * 0.2))
+    train_size = dataset_size - test_size
 
-    # Create DataLoader
-    train_dataset = torch.utils.data.TensorDataset(train_images, train_labels)
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=8, shuffle=True
-    )
+    train_imgs = training_images[:train_size]
+    train_lbls = training_labels[:train_size]
+    test_imgs = training_images[train_size:]
+    test_lbls = training_labels[train_size:]
+
+    train_transforms = transforms.Compose([
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(10),
+        transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2),
+        transforms.ToTensor(),
+    ])
+
+    # Тестові трансформації також оновлюємо для відповідності
+    test_transforms = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+    ])
+
+    # --- Apply transforms manually ---
+    train_tensors = [train_transforms(img) for img in train_imgs]
+    test_tensors = [test_transforms(img) for img in test_imgs]
+
+    # Convert lists to tensors
+    train_dataset = TensorDataset(torch.stack(train_tensors), torch.tensor(train_lbls))
+    test_dataset = TensorDataset(torch.stack(test_tensors), torch.tensor(test_lbls))
+
+    train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False)
 
     # Get current model metrics before retraining
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Розділення на train і test
-    test_size = max(1, int(len(train_dataset) * 0.2))
-    train_size = len(train_dataset) - test_size
-    train_subset, test_subset = torch.utils.data.random_split(
-        train_dataset, [train_size, test_size]
-    )
-
-    test_loader = torch.utils.data.DataLoader(test_subset, batch_size=8, shuffle=False)
-    train_subset_loader = torch.utils.data.DataLoader(
-        train_subset, batch_size=8, shuffle=True
-    )
-
 
     latest_metrics = (
         db.query(ModelMetrics)
@@ -270,7 +284,7 @@ async def retrain_model(request: RetrainingRequestModel, db: Session = Depends(g
 
     # Тренуємо модель
     train_loss, train_accuracy, train_precision, train_recall, train_f1 = train(
-        model_to_train, criterion, optimizer, device, train_subset_loader
+        model_to_train, criterion, optimizer, device, train_loader
     )
 
     # Оцінюємо після ретренування
