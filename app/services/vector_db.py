@@ -12,7 +12,7 @@ from weaviate.collections.classes.filters import Filter
 
 load_dotenv()
 HF_TOKEN = os.getenv("HUGGINGFACE_API_KEY")
-HF_API_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-mpnet-base-v2"
+HF_API_URL = "https://router.huggingface.co/hf-inference/models/BAAI/bge-base-en-v1.5/pipeline/feature-extraction"
 HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
 
 

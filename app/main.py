@@ -22,7 +22,6 @@ from app.routers.vector import router as vectors_router
 from fastapi import FastAPI
 
 # To run this app:
-# fastapi dev main.py
 
 app = FastAPI()
 

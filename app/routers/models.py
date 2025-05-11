@@ -1,7 +1,10 @@
+import io
 import json
+import os
 from urllib.parse import urlparse
 
 import boto3
+from dotenv import load_dotenv
 from fastapi import HTTPException, APIRouter, Depends
 from sqlalchemy.orm import Session
 from torch.utils.data import TensorDataset, DataLoader
@@ -25,6 +28,8 @@ from app.config import CLASS_LABELS, DETECTION_TYPE, RESULTS_FOLDER
 router = APIRouter()
 
 NUM_CLASSES = 7
+
+
 class S3ClientSingleton:
     _instance = None
 
@@ -33,45 +38,51 @@ class S3ClientSingleton:
             cls._instance = boto3.client("s3")
         return cls._instance
 
+
 valid_transform = transforms.Compose(
     [
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        # transforms.Normalize(mean=[0.5], std=[0.5]),
     ]
 )
 classif_transform = transforms.Compose(
     [
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        # transforms.Normalize(mean=[0.5], std=[0.5]),
     ]
 )
 
+load_dotenv()
+s3 = S3ClientSingleton()
+bucket_name = os.getenv("S3_BUCKET_NAME")
+
+
+def load_model_from_s3(bucket, key, model, device):
+    response = s3.get_object(Bucket=bucket, Key=key)
+    buffer = io.BytesIO(response["Body"].read())
+    state_dict = torch.load(buffer, map_location=device)
+    model.load_state_dict(state_dict)
+    return model
+
+
+device = torch.device("cpu")
+
 validation_model = ConvNeuralNet(num_classes=2)
-validation_model.load_state_dict(
-    torch.load("C:/Diploma/Diploma/app/internal/models/files/validation_model.pth")
+validation_model = load_model_from_s3(
+    bucket_name, "models/validation_model.pth", validation_model, device
 )
 validation_model.eval()
 
-device = torch.device('cpu') # Optimizes GPU performance
-
 classification_model = models.mobilenet_v2(pretrained=False)
 classification_model.classifier = nn.Sequential(
-    nn.Dropout(0.3),
-    nn.Linear(classification_model.last_channel, NUM_CLASSES)
+    nn.Dropout(0.3), nn.Linear(classification_model.last_channel, NUM_CLASSES)
 )
 
-classification_model.load_state_dict(torch.load("C:/Diploma/Diploma/app/internal/models/files/mobilenet_skin_disease_model.pth", map_location=device))
+classification_model = load_model_from_s3(
+    bucket_name, "models/mobilenet_skin_disease_model.pth", classification_model, device
+)
 classification_model.to(device)
 classification_model.eval()
-# classification_model = ConvNeuralNet(num_classes=7)
-# classification_model.load_state_dict(
-#     torch.load(
-#         "C:/Diploma/Diploma/app/internal/models/files/custom_classification_model.pth"
-#     )
-# )
-# classification_model.eval()
 
 
 @router.post("/validate-skin")
@@ -236,19 +247,23 @@ async def retrain_model(request: RetrainingRequestModel, db: Session = Depends(g
     test_imgs = training_images[train_size:]
     test_lbls = training_labels[train_size:]
 
-    train_transforms = transforms.Compose([
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(10),
-        transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2),
-        transforms.ToTensor(),
-    ])
+    train_transforms = transforms.Compose(
+        [
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(10),
+            transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2),
+            transforms.ToTensor(),
+        ]
+    )
 
     # Тестові трансформації також оновлюємо для відповідності
-    test_transforms = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-    ])
+    test_transforms = transforms.Compose(
+        [
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+        ]
+    )
 
     # --- Apply transforms manually ---
     train_tensors = [train_transforms(img) for img in train_imgs]
@@ -272,8 +287,7 @@ async def retrain_model(request: RetrainingRequestModel, db: Session = Depends(g
 
     model_to_train = models.mobilenet_v2(pretrained=False)
     model_to_train.classifier = nn.Sequential(
-        nn.Dropout(0.3),
-        nn.Linear(model_to_train.last_channel, NUM_CLASSES)
+        nn.Dropout(0.3), nn.Linear(model_to_train.last_channel, NUM_CLASSES)
     )
     model_to_train.load_state_dict(classification_model.state_dict())
     model_to_train.to(device)
