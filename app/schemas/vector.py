@@ -2,7 +2,7 @@ from typing import List, Dict, Any, Optional
 
 from pydantic import BaseModel
 
-from vector_db import Document
+from app.services.vector_db import Document
 
 
 # Моделі запитів
