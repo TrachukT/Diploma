@@ -45,7 +45,7 @@ To run the FastAPI application, follow these steps:
 2. **Start FastAPI in development mode** with the following command:
 
    ```bash
-   fastapi dev main.py
+   run server.py
    ```
 
    This will start the FastAPI application in development mode (it will allow automatic reloading when changes are made).
