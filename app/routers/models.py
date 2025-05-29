@@ -1,6 +1,7 @@
 import io
 import json
 import os
+from datetime import datetime
 from urllib.parse import urlparse
 
 import boto3
@@ -77,9 +78,9 @@ classification_model = models.mobilenet_v2(pretrained=False)
 classification_model.classifier = nn.Sequential(
     nn.Dropout(0.3), nn.Linear(classification_model.last_channel, NUM_CLASSES)
 )
-
+classification_model_key = "models/mobilenet_skin_disease_model.pth"
 classification_model = load_model_from_s3(
-    bucket_name, "models/mobilenet_skin_disease_model.pth", classification_model, device
+    bucket_name, classification_model_key, classification_model, device
 )
 classification_model.to(device)
 classification_model.eval()
@@ -176,47 +177,37 @@ async def classify_skin(request: ClassificationRequestModel):
 @router.post("/retrain-model", response_model=RetrainingResponse)
 async def retrain_model(request: RetrainingRequestModel, db: Session = Depends(get_db)):
     urls = request.urls
-    user_id = request.user_id
     timestamp = request.timestamp
 
-    # Initialize S3 client
     s3 = S3ClientSingleton()
 
-    # Lists to store training data
     training_images = []
     training_labels = []
     bucket_name = None
-    # Process each image URL
     for url in urls:
         try:
-            # Parse S3 URL
             parsed_url = urlparse(url)
             if parsed_url.scheme != "s3":
-                continue  # Skip invalid URLs
+                continue
 
             bucket_name = parsed_url.netloc
             object_key = parsed_url.path.lstrip("/")
 
-            # Get image from S3
             response = s3.get_object(Bucket=bucket_name, Key=object_key)
             response_content = response["Body"].read()
             result_response = json.loads(response_content.decode("utf-8"))
 
-            # Extract the class with highest probability
-            # Видаляємо 'image_url' зі словника перед пошуком максимуму
             classification_results = {
                 k: v for k, v in result_response.items() if k != "image_url"
             }
             max_class = max(classification_results.items(), key=lambda x: x[1])
             class_name, probability = max_class
 
-            # Додаємо зображення для тренування тільки якщо ймовірність < 0.8
             if probability < 0.8:
                 parsed_url = urlparse(result_response.get("image_url"))
                 bucket_name = parsed_url.netloc
                 object_key = parsed_url.path.lstrip("/")
 
-                # Get image from S3
                 response = s3.get_object(Bucket=bucket_name, Key=object_key)
                 file_content = response["Body"].read()
 
@@ -230,7 +221,6 @@ async def retrain_model(request: RetrainingRequestModel, db: Session = Depends(g
             print(f"Error processing {url}: {str(e)}")
             continue
 
-    # If no valid training data found, return early
     if len(training_images) == 0:
         return RetrainingResponse(
             message="No valid images for retraining found",
@@ -239,7 +229,7 @@ async def retrain_model(request: RetrainingRequestModel, db: Session = Depends(g
         )
 
     dataset_size = len(training_images)
-    test_size = max(1, int(dataset_size * 0.2))
+    test_size = max(1, int(dataset_size * 0.4))
     train_size = dataset_size - test_size
 
     train_imgs = training_images[:train_size]
@@ -257,7 +247,6 @@ async def retrain_model(request: RetrainingRequestModel, db: Session = Depends(g
         ]
     )
 
-    # Тестові трансформації також оновлюємо для відповідності
     test_transforms = transforms.Compose(
         [
             transforms.Resize((224, 224)),
@@ -265,18 +254,14 @@ async def retrain_model(request: RetrainingRequestModel, db: Session = Depends(g
         ]
     )
 
-    # --- Apply transforms manually ---
     train_tensors = [train_transforms(img) for img in train_imgs]
     test_tensors = [test_transforms(img) for img in test_imgs]
 
-    # Convert lists to tensors
     train_dataset = TensorDataset(torch.stack(train_tensors), torch.tensor(train_lbls))
     test_dataset = TensorDataset(torch.stack(test_tensors), torch.tensor(test_lbls))
 
     train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False)
-
-    # Get current model metrics before retraining
 
     latest_metrics = (
         db.query(ModelMetrics)
@@ -295,36 +280,39 @@ async def retrain_model(request: RetrainingRequestModel, db: Session = Depends(g
     # Налаштування для тренування
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model_to_train.parameters(), lr=0.001)
+    num_epochs = 10
+    train_loss, train_accuracy, train_precision, train_recall, train_f1 = 0, 0, 0, 0, 0
+    eval_accuracy, eval_precision, eval_recall, eval_f1 = 0, 0, 0, 0
+    for epoch in range(num_epochs):
+        train_loss, train_accuracy, train_precision, train_recall, train_f1 = train(
+            model_to_train, criterion, optimizer, device, train_loader
+        )
 
-    # Тренуємо модель
-    train_loss, train_accuracy, train_precision, train_recall, train_f1 = train(
-        model_to_train, criterion, optimizer, device, train_loader
-    )
+        eval_accuracy, eval_precision, eval_recall, eval_f1 = evaluate(
+            model_to_train, device, test_loader
+        )
+        print(f"Epoch [{epoch + 1}/{num_epochs}]")
+        print(
+            f"Train - Loss: {train_loss:.4f}, Acc: {train_accuracy:.4f}, Prec: {train_precision:.4f}, Rec: {train_recall:.4f},F1: {train_f1:.4f}"
+        )
+        print(
+            f"Eval  - Acc: {eval_accuracy:.4f}, Prec: {eval_precision:.4f}, Rec: {eval_recall:.4f}, F1: {eval_f1:.4f}"
+        )
 
-    # Оцінюємо після ретренування
-    eval_accuracy, eval_precision, eval_recall, eval_f1 = evaluate(
-        model_to_train, device, test_loader
-    )
-
-    # Отримуємо старі метрики з БД
     old_train_acc = latest_metrics.training_accuracy or 0
     old_train_f1 = latest_metrics.training_f1_score or 0
     old_eval_acc = latest_metrics.evaluation_accuracy or 0
     old_eval_f1 = latest_metrics.evaluation_f1_score or 0
 
-    # Перевіряємо покращення
     train_improved = train_accuracy > old_train_acc and train_f1 > old_train_f1
     eval_improved = eval_accuracy > old_eval_acc and eval_f1 > old_eval_f1
 
-    # Перевіряємо, що немає оверфіту (різниця між train і eval не надто велика)
     f1_gap = abs(train_f1 - eval_f1)
-    max_allowed_gap = 0.1  # Можеш змінити цей поріг
+    max_allowed_gap = 0.18
 
     not_overfitting = f1_gap < max_allowed_gap
 
-    # Зберігаємо модель і метрики, якщо всі умови виконані
     if train_improved and eval_improved and not_overfitting:
-        # Зберігаємо модель в S3
         model_buffer = BytesIO()
         torch.save(model_to_train.state_dict(), model_buffer)
         model_buffer.seek(0)
@@ -337,28 +325,28 @@ async def retrain_model(request: RetrainingRequestModel, db: Session = Depends(g
             ContentType="application/octet-stream",
         )
 
-        # Зберігаємо метрики
-        metrics = {
-            "training_loss": float(train_loss),
-            "training_accuracy": float(train_accuracy),
-            "training_precision": float(train_precision),
-            "training_recall": float(train_recall),
-            "training_f1_score": float(train_f1),
-            "evaluation_accuracy": float(eval_accuracy),
-            "evaluation_precision": float(eval_precision),
-            "evaluation_recall": float(eval_recall),
-            "evaluation_f1_score": float(eval_f1),
-            "timestamp": timestamp,
-            "trained_on_images": len(training_images),
-        }
-
-        metrics_key = f"models/metrics_{timestamp}.json"
         s3.put_object(
             Bucket=bucket_name,
-            Key=metrics_key,
-            Body=json.dumps(metrics),
-            ContentType="application/json",
+            Key=classification_model_key,
+            Body=model_buffer.getvalue(),
+            ContentType="application/octet-stream",
         )
+
+        metrics = ModelMetrics(
+            model_type=DETECTION_TYPE,
+            training_loss=train_loss,
+            training_accuracy=train_accuracy,
+            training_precision=train_precision,
+            training_recall=train_recall,
+            training_f1_score=train_f1,
+            evaluation_accuracy=eval_accuracy,
+            evaluation_precision=eval_precision,
+            evaluation_recall=eval_recall,
+            evaluation_f1_score=eval_f1,
+            created_at=datetime.utcnow(),
+        )
+        db.add(metrics)
+        db.commit()
 
         return RetrainingResponse(
             message="Model retrained successfully with improved metrics and no overfitting",
@@ -377,7 +365,6 @@ async def retrain_model(request: RetrainingRequestModel, db: Session = Depends(g
             model_path=f"s3://{bucket_name}/{model_key}",
         )
     else:
-        # Логуємо, що метрики не покращились або є оверфіт
         print(
             f"Train improved: {train_improved}, Eval improved: {eval_improved}, F1 gap: {f1_gap}"
         )

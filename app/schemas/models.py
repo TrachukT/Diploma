@@ -17,7 +17,6 @@ class ClassificationRequestModel(BaseModel):
 
 class RetrainingRequestModel(BaseModel):
     urls: list[str] = Field(..., description="List of S3 URLs for images to retrain on")
-    user_id: str = Field(..., description="Parameter to provide a user identifier.")
     timestamp: str = Field(
         ..., description="Parameter to provide a timestamp of request."
     )
